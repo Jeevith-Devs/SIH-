@@ -84,18 +84,50 @@ class KalmanTracker:
         self.P = np.eye(6, dtype=np.float64) * 100.0
         self.last_innovation = np.zeros((2, 1), dtype=np.float64)
 
-    def predict(self, dt: Optional[float] = None) -> Tuple[float, float]:
+    def predict(self, dt: Optional[float] = None, turn_rate: float = 0.0) -> Tuple[float, float]:
         """
         Kalman time update step.
         Advances state prior X_pred = F * X, P_pred = F * P * F^T + Q.
+        Optionally applies Coordinated Turn (CT) angular rotation rate when tracking curved patterns.
         """
         if dt is not None and abs(dt - self.dt) > 1e-4:
             self.dt = dt
             self.F = self._build_transition_matrix(dt)
             self.Q = self._build_process_noise(dt, self.q_noise)
 
-        # State extrapolation
-        self.x = np.dot(self.F, self.x)
+        effective_dt = dt if dt is not None else self.dt
+
+        # If significant turn rate is specified (e.g. during target loss along circular / figure-8 pattern)
+        if abs(turn_rate) > 0.02 and self.initialized:
+            vx = float(self.x[2, 0])
+            vy = float(self.x[3, 0])
+            speed = math.hypot(vx, vy)
+            if speed > 2.0:
+                d_theta = turn_rate * effective_dt
+                cos_t = math.cos(d_theta)
+                sin_t = math.sin(d_theta)
+                
+                # Rotate velocity vector
+                new_vx = vx * cos_t - vy * sin_t
+                new_vy = vx * sin_t + vy * cos_t
+                
+                # Centripetal acceleration
+                new_ax = -turn_rate * new_vy
+                new_ay = turn_rate * new_vx
+
+                # Extrapolate position with curved arc
+                self.x[0, 0] += new_vx * effective_dt
+                self.x[1, 0] += new_vy * effective_dt
+                self.x[2, 0] = new_vx
+                self.x[3, 0] = new_vy
+                self.x[4, 0] = new_ax
+                self.x[5, 0] = new_ay
+            else:
+                self.x = np.dot(self.F, self.x)
+        else:
+            # Standard constant-acceleration state extrapolation
+            self.x = np.dot(self.F, self.x)
+
         # Covariance extrapolation
         self.P = np.dot(np.dot(self.F, self.P), self.F.T) + self.Q
 
@@ -115,6 +147,11 @@ class KalmanTracker:
         y = z - np.dot(self.H, self.x)
         self.last_innovation = y
 
+        # Spatial outlier gate: reject sudden extreme measurement jumps (> 150px)
+        dist = math.hypot(float(y[0, 0]), float(y[1, 0]))
+        if dist > 150.0 and self.initialized:
+            return self.get_state()
+
         # Innovation covariance S
         S = np.dot(np.dot(self.H, self.P), self.H.T) + self.R
 
@@ -123,6 +160,13 @@ class KalmanTracker:
 
         # Updated state estimate
         self.x = self.x + np.dot(K, y)
+
+        # Enforce physical kinematic limits (prevents velocity windup from noise)
+        max_vel = 250.0 # px/s
+        self.x[2, 0] = np.clip(self.x[2, 0], -max_vel, max_vel)
+        self.x[3, 0] = np.clip(self.x[3, 0], -max_vel, max_vel)
+        self.x[4, 0] = np.clip(self.x[4, 0], -600.0, 600.0)
+        self.x[5, 0] = np.clip(self.x[5, 0], -600.0, 600.0)
 
         # Updated estimate covariance (Joseph form for numerical stability)
         I = np.eye(6, dtype=np.float64)

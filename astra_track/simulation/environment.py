@@ -30,7 +30,8 @@ class VirtualEnvironment:
         trajectory_trail: List[Tuple[float, float]],
         fov_bounds: Tuple[float, float, float, float], # (left, top, right, bottom)
         camera_origin: Tuple[float, float] = (1000.0, 1000.0),
-        output_size: Tuple[int, int] = (600, 600)
+        output_size: Tuple[int, int] = (600, 600),
+        predicted_trail: Optional[List[Tuple[float, float]]] = None
     ) -> np.ndarray:
         """
         Renders a clean, high-contrast technical 2D world map for the dashboard center panel.
@@ -64,10 +65,17 @@ class VirtualEnvironment:
             b = int(sb)
             cv2.circle(canvas, (scx, scy), 1, (b, b, b), -1)
 
-        # 3. Trajectory trail
+        # 3. Trajectory trail (historical satellite orbit)
         if len(trajectory_trail) > 1:
             points = np.array([to_canvas(px, py) for px, py in trajectory_trail], dtype=np.int32)
             cv2.polylines(canvas, [points], isClosed=False, color=(163, 113, 247), thickness=1, lineType=cv2.LINE_AA)
+
+        # 3b. Predicted forward trajectory pattern (cyan forward projection)
+        if predicted_trail and len(predicted_trail) > 1:
+            pred_pts = np.array([to_canvas(px, py) for px, py in predicted_trail], dtype=np.int32)
+            cv2.polylines(canvas, [pred_pts], isClosed=False, color=(88, 166, 255), thickness=2, lineType=cv2.LINE_AA)
+            for p in pred_pts:
+                cv2.circle(canvas, tuple(p), 2, (88, 166, 255), -1, cv2.LINE_AA)
 
         # 4. Camera FOV Box
         left, top, right, bottom = fov_bounds

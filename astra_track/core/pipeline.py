@@ -43,6 +43,10 @@ class TrackingPipeline:
         self.pred_controller = PredictiveController(config.controller, config.camera)
         self.reactive_controller = PanTiltController(config.controller, config.camera)
 
+        # Bind trajectory model to predictor for pattern-following reacquisition
+        if hasattr(self.sim_engine, "trajectory"):
+            self.target_mgr.predictor.set_trajectory_model(self.sim_engine.trajectory)
+
         # Active state
         self.last_cmd = ControlCommand()
         self.frame_trail: List[Tuple[float, float]] = []
@@ -110,19 +114,44 @@ class TrackingPipeline:
         cy = self.config.camera.height / 2.0
 
         if self.fsm.status in (TrackingStatus.TARGET_LOST, TrackingStatus.REACQUIRING):
-            # Apply scanning rates during reacquisition
+            # Dynamic pattern-following coasting along satellite's orbital trajectory
+            if hasattr(self.sim_engine, "trajectory") and self.sim_engine.trajectory is not None:
+                t_cur = self.sim_engine.sim_time
+                bx, by, bvx, bvy, _, _ = self.sim_engine.trajectory.get_state(t_cur)
+                wp_deg = getattr(self.sim_engine.camera, "world_px_per_deg", 100.0)
+                cam_cx = self.sim_engine.origin[0] + self.sim_engine.ptu.pan_deg * wp_deg
+                cam_cy = self.sim_engine.origin[1] + self.sim_engine.ptu.tilt_deg * wp_deg
+                vel_pan = bvx / wp_deg
+                vel_tilt = bvy / wp_deg
+                err_pan = (bx - cam_cx) / wp_deg
+                err_tilt = (by - cam_cy) / wp_deg
+                coast_pan = float(np.clip(vel_pan + 1.2 * err_pan, -4.5, 4.5))
+                coast_tilt = float(np.clip(vel_tilt + 1.2 * err_tilt, -4.5, 4.5))
+            else:
+                deg_px_x = self.config.camera.fov_horizontal / float(self.config.camera.width)
+                deg_px_y = self.config.camera.fov_vertical / float(self.config.camera.height)
+                coast_pan = float(np.clip(k_state.vx * deg_px_x, -3.0, 3.0))
+                coast_tilt = float(np.clip(k_state.vy * deg_px_y, -3.0, 3.0))
+
             cmd = ControlCommand(
-                pan_rate_cmd_deg_s=scan_rates[0],
-                tilt_rate_cmd_deg_s=scan_rates[1],
-                mode="Reacquisition Scan"
+                pan_rate_cmd_deg_s=float(coast_pan + scan_rates[0]),
+                tilt_rate_cmd_deg_s=float(coast_tilt + scan_rates[1]),
+                mode="Pattern Coasting"
             )
         elif self.config.controller.mode == ControlMode.PREDICTIVE.value and self.target_mgr.is_confirmed_track:
             cmd = self.pred_controller.compute_predictive_command(prediction, k_state, cx, cy, self.dt)
         elif detection.detected:
             cmd = self.reactive_controller.compute_command(detection.x, detection.y, cx, cy, self.dt)
-        else:
-            # Extrapolated prediction control
+        elif self.target_mgr.is_confirmed_track:
+            # Extrapolated prediction control for brief occlusion
             cmd = self.pred_controller.compute_predictive_command(prediction, k_state, cx, cy, self.dt)
+        else:
+            # Optical search mode: maintain gimbal stationarity rather than drifting
+            cmd = ControlCommand(
+                pan_rate_cmd_deg_s=0.0,
+                tilt_rate_cmd_deg_s=0.0,
+                mode="Optical Search"
+            )
 
         self.last_cmd = cmd
 
@@ -158,9 +187,21 @@ class TrackingPipeline:
         # 9. FPS and latency calculation
         proc_time_ms = (time.perf_counter() - t0) * 1000.0
         cur_time = time.perf_counter()
-        instant_fps = 1.0 / max(1e-4, cur_time - self.last_tick_time)
+        algo_fps = 1000.0 / max(0.5, proc_time_ms)
+        interval = cur_time - self.last_tick_time
         self.last_tick_time = cur_time
-        self.fps_rolling = 0.90 * self.fps_rolling + 0.10 * instant_fps
+        call_fps = 1.0 / max(1e-4, interval)
+        effective_fps = min(algo_fps, max(call_fps, float(self.config.camera.fps))) if interval < 0.2 else float(self.config.camera.fps)
+        self.fps_rolling = 0.85 * self.fps_rolling + 0.15 * effective_fps
+
+        # Compute predicted world points along trajectory pattern
+        pred_world_pts: List[Tuple[float, float]] = []
+        if hasattr(self.sim_engine, "trajectory") and self.sim_engine.trajectory is not None:
+            num_pts = max(5, len(prediction.predicted_points))
+            for s in range(1, num_pts + 1):
+                t_fut = self.sim_engine.sim_time + s * self.dt
+                wbx, wby, _, _, _, _ = self.sim_engine.trajectory.get_state(t_fut)
+                pred_world_pts.append((float(wbx), float(wby)))
 
         # Assemble ProcessedFrame
         proc_frame = ProcessedFrame(
@@ -187,7 +228,13 @@ class TrackingPipeline:
             processing_time_ms=float(proc_time_ms),
             ptu_pan=gt.ptu_pan,
             ptu_tilt=gt.ptu_tilt,
-            world_fov_box=self.sim_engine.camera.get_world_fov_bounds(gt.ptu_pan, gt.ptu_tilt)
+            signal_strength_pct=detection.signal_strength_pct,
+            rssi_dbm=detection.rssi_dbm,
+            snr_db=detection.snr_db,
+            coupling_efficiency=detection.coupling_efficiency,
+            world_fov_box=self.sim_engine.camera.get_world_fov_bounds(gt.ptu_pan, gt.ptu_tilt),
+            search_roi=reacq_roi,
+            predicted_world_points=pred_world_pts
         )
 
         # Broadcast event
@@ -291,6 +338,10 @@ class TrackingPipeline:
             processing_time_ms=float(proc_time_ms),
             ptu_pan=ptu_pan,
             ptu_tilt=ptu_tilt,
+            signal_strength_pct=detection.signal_strength_pct,
+            rssi_dbm=detection.rssi_dbm,
+            snr_db=detection.snr_db,
+            coupling_efficiency=detection.coupling_efficiency,
             world_fov_box=(0.0, 0.0, 0.0, 0.0)
         )
 

@@ -409,6 +409,7 @@ class AstraTrackApp:
         fields = [
             ("Tracking State", "INITIALIZING"),
             ("Processing FPS", "30.0"),
+            ("Signal Strength", "0 % (-50 dBm)"),
             ("Tracking Error", "0.0 px"),
             ("Angular Error", "0.00°"),
             ("Detection Confidence", "0.0 %"),
@@ -576,6 +577,7 @@ class AstraTrackApp:
 
     def _sim_tick_loop(self):
         """High-FPS periodic animation and telemetry update loop."""
+        t_start = time.perf_counter()
         if self.is_sim_running and not self.is_sim_paused:
             if self.input_mode == "WEBCAM":
                 # --- LIVE HARDWARE WEBCAM MODE ---
@@ -605,7 +607,7 @@ class AstraTrackApp:
 
                         # 3. Telemetry & Plots
                         self._update_telemetry_readouts(proc)
-                        if proc.frame_id % 5 == 0:
+                        if proc.frame_id % 15 == 0:
                             self._update_dashboard_plots()
             else:
                 # --- VIRTUAL SIMULATION MODE ---
@@ -617,35 +619,36 @@ class AstraTrackApp:
                 self.session_recorder.record_frame(proc)
 
                 # 1. Update Camera View Canvas
-                reacq_box = None
-                if proc.tracking_status in (TrackingStatus.TARGET_LOST, TrackingStatus.REACQUIRING):
-                    reacq_box = self.pipeline.reacq_mgr.update(self.pipeline.dt, proc.kalman)[0]
+                reacq_box = proc.search_roi if proc.tracking_status in (TrackingStatus.TARGET_LOST, TrackingStatus.REACQUIRING) else None
 
                 hud_frame = HUDVisualizer.render_camera_hud(
                     proc.raw_frame, proc, self.pipeline.frame_trail, search_roi=reacq_box
                 )
                 self._display_image_on_label(hud_frame, self.cam_canvas, (460, 345))
 
-                # 2. Update World Map Canvas
+                # 2. Update World Map Canvas with predicted pattern projection
                 fov_bounds = self.pipeline.sim_engine.camera.get_world_fov_bounds(proc.ptu_pan, proc.ptu_tilt)
                 world_bgr = self.pipeline.sim_engine.env.render_world_map(
                     beacon_world_pos=(proc.ground_truth.world_x, proc.ground_truth.world_y),
                     trajectory_trail=self.pipeline.sim_engine.trajectory.trail,
                     fov_bounds=fov_bounds,
                     camera_origin=self.pipeline.sim_engine.origin,
-                    output_size=(460, 345)
+                    output_size=(460, 345),
+                    predicted_trail=proc.predicted_world_points
                 )
                 self._display_image_on_label(world_bgr, self.world_canvas, (460, 345))
 
                 # 3. Update Telemetry Badges
                 self._update_telemetry_readouts(proc)
 
-                # 4. Refresh Plots periodically (every 5 frames)
-                if proc.frame_id % 5 == 0:
+                # 4. Refresh Plots periodically (every 15 frames for high FPS)
+                if proc.frame_id % 15 == 0:
                     self._update_dashboard_plots()
 
-        # Schedule next tick (30 FPS default)
-        interval_ms = max(10, int(33 / max(0.25, self.sim_speed)))
+        # Adaptive periodic scheduling maintaining nominal 30 FPS
+        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+        target_period_ms = 33.3 / max(0.25, self.sim_speed)
+        interval_ms = max(1, int(target_period_ms - elapsed_ms))
         self.root.after(interval_ms, self._sim_tick_loop)
 
     def _display_image_on_label(self, cv_img_bgr: np.ndarray, label_widget: tk.Label, target_size: Tuple[int, int]):
@@ -677,6 +680,12 @@ class AstraTrackApp:
 
         self.telemetry_labels["Tracking State"].configure(text=st, fg=col)
         self.telemetry_labels["Processing FPS"].configure(text=f"{proc.fps:.1f}")
+        
+        sig_col = PALETTE["target_detected"] if proc.signal_strength_pct > 65.0 else (PALETTE["reacquiring"] if proc.signal_strength_pct > 30.0 else PALETTE["target_lost"])
+        self.telemetry_labels["Signal Strength"].configure(
+            text=f"{proc.signal_strength_pct:.0f}% ({proc.rssi_dbm:.1f} dBm)",
+            fg=sig_col
+        )
         
         err_col = PALETTE["target_detected"] if proc.tracking_error_px <= 10.0 else PALETTE["target_lost"]
         self.telemetry_labels["Tracking Error"].configure(text=f"{proc.tracking_error_px:.1f} px", fg=err_col)
@@ -790,13 +799,6 @@ class AstraTrackApp:
     def start_judge_demo(self):
         """One-click automated sequence demonstrating all innovations to SIH evaluators."""
         self.show_page("dashboard")
-        self.reset_simulation()
-        self.is_demo_mode = True
-        self.demo_step = 1
-        self.demo_timer = time.time()
-        self.is_sim_running = True
-        self.is_sim_paused = False
-        self.btn_sim_play.configure(text="⏹ STOP DEMO", bg=PALETTE["target_lost"])
         messagebox.showinfo("SIH Demonstration Mode",
                             "Initiating Judge Demonstration Sequence:\n\n"
                             "1. Baseline Optical Lock\n"
@@ -807,6 +809,22 @@ class AstraTrackApp:
                             "6. Predictive Uncertainty Reacquisition\n"
                             "7. Lock Restoration & Official Scorecard")
 
+        self.reset_simulation()
+        self.session_recorder = SessionRecorder("SIH Judge Demonstration", db_manager=self.db_manager)
+
+        # Configure dynamic tracking gimbal limits
+        self.pipeline.config.camera.max_pan_speed = 8.0
+        self.pipeline.config.camera.max_tilt_speed = 8.0
+        self.pipeline.pred_controller.max_speed_pan = 8.0
+        self.pipeline.pred_controller.max_speed_tilt = 8.0
+
+        self.is_demo_mode = True
+        self.demo_step = 1
+        self.demo_timer = time.time()
+        self.is_sim_running = True
+        self.is_sim_paused = False
+        self.btn_sim_play.configure(text="⏹ STOP DEMO", bg=PALETTE["target_lost"])
+
     def _update_demo_mode(self):
         elapsed = time.time() - self.demo_timer
 
@@ -815,32 +833,38 @@ class AstraTrackApp:
             if elapsed > 4.0:
                 self.demo_step = 2
                 self.demo_timer = time.time()
-                # Fast circular maneuver
+                # Fast circular maneuver with proper trajectory instantiation
+                from astra_track.simulation.trajectories import create_trajectory
                 self.pipeline.config.trajectory.type = TrajectoryType.CIRCULAR.value
-                self.pipeline.config.trajectory.speed = 95.0
-                self.pipeline.sim_engine.trajectory = self.pipeline.sim_engine.trajectory
+                self.pipeline.config.trajectory.speed = 80.0
+                self.pipeline.config.trajectory.radius = 200.0
+                self.pipeline.sim_engine.trajectory = create_trajectory(
+                    self.pipeline.config.trajectory,
+                    origin=self.pipeline.sim_engine.origin,
+                    world_bounds=(self.pipeline.config.environment.width, self.pipeline.config.environment.height)
+                )
 
         elif self.demo_step == 2:
             self.lbl_dash_status.configure(text="DEMO 2/7: HIGH-SPEED MANEUVER (PREDICTIVE CONTROL)")
-            if elapsed > 5.0:
+            if elapsed > 4.5:
                 self.demo_step = 3
                 self.demo_timer = time.time()
                 # Fog & Noise
                 self.pipeline.config.atmosphere.mode = AtmosphereMode.FOG.value
-                self.pipeline.config.atmosphere.intensity = 0.45
-                self.pipeline.config.noise.salt_pepper = 0.08
+                self.pipeline.config.atmosphere.intensity = 0.40
+                self.pipeline.config.noise.salt_pepper = 0.05
 
         elif self.demo_step == 3:
             self.lbl_dash_status.configure(text="DEMO 3/7: ATMOSPHERIC FOG & SENSOR NOISE DEGRADATION")
-            if elapsed > 5.0:
+            if elapsed > 4.5:
                 self.demo_step = 4
                 self.demo_timer = time.time()
-                # Jitter
-                self.pipeline.config.disturbance.camera_jitter_amp = 10.0
+                # Mechanical Jitter Pulse
+                self.pipeline.config.disturbance.camera_jitter_amp = 6.0
 
         elif self.demo_step == 4:
             self.lbl_dash_status.configure(text="DEMO 4/7: PLATFORM MECHANICAL JITTER PULSE")
-            if elapsed > 4.0:
+            if elapsed > 3.5:
                 self.demo_step = 5
                 self.demo_timer = time.time()
                 # Trigger target loss
@@ -854,7 +878,7 @@ class AstraTrackApp:
 
         elif self.demo_step == 6:
             self.lbl_dash_status.configure(text="DEMO 6/7: PREDICTIVE REACQUISITION ACTIVE")
-            if elapsed > 4.0:
+            if elapsed > 3.5:
                 self.demo_step = 7
                 self.demo_timer = time.time()
                 self.is_demo_mode = False

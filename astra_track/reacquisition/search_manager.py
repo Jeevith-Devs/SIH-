@@ -31,17 +31,23 @@ class ReacquisitionManager:
         self.stage = ReacquisitionStage.IDLE
         self.loss_elapsed_time = 0.0
         self.frames_in_loss = 0
+        self.last_scan_pan = 0.0
+        self.last_scan_tilt = 0.0
 
     def reset(self):
         self.stage = ReacquisitionStage.IDLE
         self.loss_elapsed_time = 0.0
         self.frames_in_loss = 0
+        self.last_scan_pan = 0.0
+        self.last_scan_tilt = 0.0
         self.scanner.reset()
 
     def start_reacquisition(self):
         self.stage = ReacquisitionStage.PREDICTED_ROI
         self.loss_elapsed_time = 0.0
         self.frames_in_loss = 0
+        self.last_scan_pan = 0.0
+        self.last_scan_tilt = 0.0
         self.scanner.reset()
 
     def update(
@@ -72,15 +78,23 @@ class ReacquisitionManager:
 
         elif self.loss_elapsed_time < 1.20:
             self.stage = ReacquisitionStage.LOCAL_SPIRAL
-            # Full frame search with physical camera spiral slew
+            # Full frame search with bounded spiral modulation around origin
             roi = None
             d_pan, d_tilt = self.scanner.get_spiral_offset(dt)
-            scan_rates = (d_pan * 1.5, d_tilt * 1.5)
+            rate_pan = (d_pan - self.last_scan_pan) / max(1e-4, dt)
+            rate_tilt = (d_tilt - self.last_scan_tilt) / max(1e-4, dt)
+            self.last_scan_pan = d_pan
+            self.last_scan_tilt = d_tilt
+            scan_rates = (rate_pan, rate_tilt)
 
         else:
             self.stage = ReacquisitionStage.GLOBAL_SWEEP
             roi = None
             d_pan, d_tilt = self.scanner.get_raster_offset(self.loss_elapsed_time)
-            scan_rates = (d_pan * 2.0, d_tilt * 2.0)
+            rate_pan = (d_pan - self.last_scan_pan) / max(1e-4, dt)
+            rate_tilt = (d_tilt - self.last_scan_tilt) / max(1e-4, dt)
+            self.last_scan_pan = d_pan
+            self.last_scan_tilt = d_tilt
+            scan_rates = (rate_pan, rate_tilt)
 
         return roi, scan_rates, self.stage.value

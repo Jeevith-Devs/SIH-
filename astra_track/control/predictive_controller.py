@@ -68,9 +68,14 @@ class PredictiveController(BaseController):
         lead_x = prediction.lead_target_x
         lead_y = prediction.lead_target_y
 
+        # Clamp lead target within plausible sensor acquisition range
+        margin = 60.0
+        clamped_lead_x = max(-margin, min(float(self.cam_config.width) + margin, lead_x))
+        clamped_lead_y = max(-margin, min(float(self.cam_config.height) + margin, lead_y))
+
         # Error between future predicted target and camera boresight
-        lead_err_x = lead_x - center_x
-        lead_err_y = lead_y - center_y
+        lead_err_x = clamped_lead_x - center_x
+        lead_err_y = clamped_lead_y - center_y
 
         pan_err_deg = lead_err_x * self.deg_per_px_x
         tilt_err_deg = lead_err_y * self.deg_per_px_y
@@ -79,9 +84,12 @@ class PredictiveController(BaseController):
         eff_pan_err = 0.0 if abs(pan_err_deg) < self.deadzone else pan_err_deg
         eff_tilt_err = 0.0 if abs(tilt_err_deg) < self.deadzone else tilt_err_deg
 
-        # Kinematic Feedforward Rate (deg/s) from Kalman estimated velocity
-        ff_rate_pan = k_state.vx * self.deg_per_px_x
-        ff_rate_tilt = k_state.vy * self.deg_per_px_y
+        # Kinematic Feedforward Rate (deg/s) bounded to physical satellite orbital envelope
+        max_ff_vel = 180.0 # px/s (~1.1 deg/s max orbital drift across FOV)
+        clamped_vx = max(-max_ff_vel, min(max_ff_vel, k_state.vx))
+        clamped_vy = max(-max_ff_vel, min(max_ff_vel, k_state.vy))
+        ff_rate_pan = clamped_vx * self.deg_per_px_x
+        ff_rate_tilt = clamped_vy * self.deg_per_px_y
 
         # Composite command: Feedback on lead position + Feedforward velocity
         pan_rate = 0.60 * ff_rate_pan + self.kp_pan * eff_pan_err

@@ -101,7 +101,7 @@ class HUDVisualizer:
         if proc.prediction.predicted_points:
             pred_pts = [(int(round(px)), int(round(py))) for px, py in proc.prediction.predicted_points]
             for i, p in enumerate(pred_pts):
-                cv2.circle(canvas, p, 2 + i, (88, 166, 255), -1, cv2.LINE_AA)
+                cv2.circle(canvas, p, 2 + min(3, i // 3), (88, 166, 255), -1, cv2.LINE_AA)
             if len(pred_pts) > 1:
                 cv2.polylines(canvas, [np.array(pred_pts, dtype=np.int32)], isClosed=False, color=(88, 166, 255), thickness=1, lineType=cv2.LINE_AA)
 
@@ -109,6 +109,32 @@ class HUDVisualizer:
             lx = int(round(proc.prediction.lead_target_x))
             ly = int(round(proc.prediction.lead_target_y))
             cv2.drawMarker(canvas, (lx, ly), (88, 166, 255), markerType=cv2.MARKER_TILTED_CROSS, markerSize=12, thickness=1, line_type=cv2.LINE_AA)
+
+            # Trajectory Pattern Indicator during loss
+            if "LOST" in proc.tracking_status.value or "REACQ" in proc.tracking_status.value:
+                cv2.putText(canvas, "PATTERN COASTING", (lx + 8, ly - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (88, 166, 255), 1, cv2.LINE_AA)
+
+        # 7b. Optical RSSI Signal Strength Vertical Meter
+        bar_x = w - 24
+        bar_y = 52
+        bar_w = 12
+        bar_h = 75
+        cv2.rectangle(canvas, (bar_x - 1, bar_y - 1), (bar_x + bar_w + 1, bar_y + bar_h + 1), (50, 70, 90), 1)
+        cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (20, 26, 35), -1)
+        
+        fill_pct = max(0.0, min(1.0, proc.signal_strength_pct / 100.0))
+        fill_h = int(round(fill_pct * bar_h))
+        if fill_pct > 0.65:
+            col_rssi = (63, 185, 80) # Green
+        elif fill_pct > 0.30:
+            col_rssi = (210, 153, 34) # Amber
+        else:
+            col_rssi = (248, 81, 73) # Red
+
+        if fill_h > 0:
+            cv2.rectangle(canvas, (bar_x, bar_y + bar_h - fill_h), (bar_x + bar_w, bar_y + bar_h), col_rssi, -1)
+        cv2.putText(canvas, "SIG", (bar_x - 1, bar_y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (139, 148, 158), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"{proc.signal_strength_pct:.0f}%", (bar_x - 4, bar_y + bar_h + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.28, col_rssi, 1, cv2.LINE_AA)
 
         # 8. Top Banner Background Overlay
         top_bar = canvas.copy()
@@ -130,11 +156,15 @@ class HUDVisualizer:
         cv2.putText(canvas, "ASTRA-TRACK", (12, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 246, 252), 1, cv2.LINE_AA)
         cv2.putText(canvas, f"STATUS: {status_val}", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.40, col_status, 1, cv2.LINE_AA)
 
-        cv2.putText(canvas, f"FPS: {proc.fps:.1f}", (w - 190, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 246, 252), 1, cv2.LINE_AA)
-        cv2.putText(canvas, f"ERR: {proc.tracking_error_px:.1f}px ({proc.angular_error_deg*60:.1f}')", (w - 190, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 246, 252), 1, cv2.LINE_AA)
+        # Signal Strength / Optical Power telemetry in top bar
+        sig_text = f"RSSI: {proc.rssi_dbm:.1f} dBm | SNR: {proc.snr_db:.1f} dB"
+        cv2.putText(canvas, sig_text, (200, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.40, col_rssi, 1, cv2.LINE_AA)
+
+        cv2.putText(canvas, f"FPS: {proc.fps:.1f}", (w - 180, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 246, 252), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"ERR: {proc.tracking_error_px:.1f}px ({proc.angular_error_deg*60:.1f}')", (w - 180, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 246, 252), 1, cv2.LINE_AA)
 
         # 10. Bottom Actuator & Kinematics Bar
-        bot_txt = f"PAN: {proc.ptu_pan:+.2f}*  TILT: {proc.ptu_tilt:+.2f}* | SPEED: {proc.kalman.speed:.1f} px/s | CONF: {proc.detection.confidence*100:.0f}% | MODE: {proc.control.mode}"
+        bot_txt = f"PAN: {proc.ptu_pan:+.2f}*  TILT: {proc.ptu_tilt:+.2f}* | SPEED: {proc.kalman.speed:.1f} px/s | CONF: {proc.detection.confidence*100:.0f}% | SIG: {proc.signal_strength_pct:.0f}% | MODE: {proc.control.mode}"
         cv2.putText(canvas, bot_txt, (12, h - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (139, 148, 158), 1, cv2.LINE_AA)
 
         return canvas

@@ -38,6 +38,8 @@ class DetectionCandidate:
     snr: float
     circularity: float
     score: float = 0.0
+    snr_db: float = 0.0
+    rssi_dbm: float = -50.0
 
 
 @dataclass
@@ -57,6 +59,10 @@ class DetectionResult:
     carrier_freq_hz: float = 0.0
     spectral_purity: float = 0.0
     is_carrier_matched: bool = False
+    snr_db: float = 0.0
+    signal_strength_pct: float = 0.0
+    rssi_dbm: float = -50.0
+    coupling_efficiency: float = 0.0
 
 
 @dataclass
@@ -127,4 +133,11 @@ class ProcessedFrame:
     processing_time_ms: float = 0.0
     ptu_pan: float = 0.0
     ptu_tilt: float = 0.0
+    signal_strength_pct: float = 0.0
+    rssi_dbm: float = -50.0
+    snr_db: float = 0.0
+    coupling_efficiency: float = 0.0
     world_fov_box: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0) # (left, top, right, bottom)
+    search_roi: Optional[Tuple[int, int, int, int]] = None
+    predicted_world_points: List[Tuple[float, float]] = field(default_factory=list)
+

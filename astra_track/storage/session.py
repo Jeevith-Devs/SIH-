@@ -101,7 +101,7 @@ class SessionRecorder:
             locked_frames=self.locked_frames
         )
 
-        is_reacq = ("reacquisition" in self.scenario_name.lower()) or ("stress" in self.scenario_name.lower() and perf_summary["avg_reacquisition_time_s"] > 0)
+        is_reacq = ("reacquisition" in self.scenario_name.lower()) or ("demo" in self.scenario_name.lower()) or ("loss" in self.scenario_name.lower()) or (perf_summary["avg_reacquisition_time_s"] > 0)
         overall_pass, criteria_verdicts = PerformanceReportGenerator.evaluate_benchmark(
             acq_time_s=perf_summary["acquisition_time_s"],
             avg_err_px=acc_summary["avg_error_px"],

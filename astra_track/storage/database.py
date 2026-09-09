@@ -5,6 +5,7 @@ SQLite local database for simulation sessions, telemetry, and SIH benchmark resu
 import sqlite3
 import json
 import os
+import time
 from typing import List, Dict, Any, Optional
 
 
@@ -19,6 +20,24 @@ class DatabaseManager:
         return sqlite3.connect(self.db_path)
 
     def _init_db(self):
+        if os.path.exists(self.db_path):
+            is_corrupt = False
+            conn = None
+            try:
+                conn = sqlite3.connect(self.db_path)
+                conn.execute("SELECT 1 FROM sqlite_master LIMIT 1;")
+            except (sqlite3.DatabaseError, sqlite3.OperationalError):
+                is_corrupt = True
+            finally:
+                if conn is not None:
+                    conn.close()
+
+            if is_corrupt:
+                try:
+                    os.remove(self.db_path)
+                except Exception:
+                    pass
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             # Table: simulations

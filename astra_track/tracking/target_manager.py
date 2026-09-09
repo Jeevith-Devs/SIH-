@@ -32,6 +32,7 @@ class TargetManager:
 
     def reset(self):
         self.kalman.reset()
+        self.predictor.reset()
         self.is_confirmed_track = False
         self.consecutive_hits = 0
         self.consecutive_misses = 0
@@ -48,8 +49,9 @@ class TargetManager:
         Returns:
             (KalmanState, PredictionResult, is_track_valid)
         """
-        # 1. Kalman Predict Step
-        pred_x, pred_y = self.kalman.predict(dt=dt)
+        # 1. Kalman Predict Step with pattern turn rate propagation
+        turn_rate = self.predictor.last_turn_rate if self.is_confirmed_track else 0.0
+        pred_x, pred_y = self.kalman.predict(dt=dt, turn_rate=turn_rate)
 
         is_valid_measurement = False
 
@@ -60,6 +62,16 @@ class TargetManager:
                 # Max permissible jump in one frame (e.g. 150 px)
                 max_gate = max(60.0, 4.0 * self.last_kalman_state.uncertainty_radius)
                 if gate_dist <= max_gate:
+                    is_valid_measurement = True
+            elif self.consecutive_hits > 0:
+                # Gating during track initiation to prevent linking disparate noise specks
+                gate_dist = math.hypot(detection.x - pred_x, detection.y - pred_y)
+                if gate_dist <= 80.0:
+                    is_valid_measurement = True
+                else:
+                    # New isolated candidate, reset hit count and re-initialize
+                    self.consecutive_hits = 0
+                    self.kalman.init_state(detection.x, detection.y)
                     is_valid_measurement = True
             else:
                 is_valid_measurement = True
@@ -73,14 +85,17 @@ class TargetManager:
             if self.consecutive_hits >= self.confirmation_threshold:
                 self.is_confirmed_track = True
             k_state = self.kalman.update(detection.x, detection.y)
+            self.predictor.update_history(detection.x, detection.y, k_state.vx, k_state.vy)
         else:
             self.consecutive_misses += 1
             self.consecutive_hits = 0
             if self.consecutive_misses >= self.loss_threshold:
                 self.is_confirmed_track = False
             k_state = self.kalman.get_state()
+            if self.is_confirmed_track or self.consecutive_misses <= self.loss_threshold:
+                self.predictor.update_history(k_state.x, k_state.y, k_state.vx, k_state.vy)
 
-        # 3. Trajectory Prediction Step
+        # 3. Trajectory Prediction Step (along curved pattern)
         prediction = self.predictor.predict(k_state)
 
         self.last_kalman_state = k_state

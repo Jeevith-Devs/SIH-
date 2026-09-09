@@ -161,6 +161,8 @@ class AstraApplication:
                 inject_loss=True
             )
             print(PerformanceReportGenerator.format_text_report(summary))
+            return 0 if summary.get("overall_pass", False) else 1
+
         # 6. Standalone 3D Gimbal Mode
         if parsed.gimbal:
             from astra_track.ui.widgets.gimbal_3d_widget import run_standalone_gimbal_window

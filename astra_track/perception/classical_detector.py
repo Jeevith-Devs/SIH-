@@ -18,7 +18,7 @@ from astra_track.perception.confidence import ConfidenceScorer
 class ClassicalDetector:
     """Robust, sub-millisecond optical spot detector optimized for high noise and adverse weather."""
 
-    def __init__(self, expected_size: int = 10, min_area: float = 4.0, max_area: float = 1200.0):
+    def __init__(self, expected_size: int = 10, min_area: float = 8.0, max_area: float = 1200.0):
         self.expected_size = expected_size
         self.min_area = min_area
         self.max_area = max_area
@@ -74,27 +74,46 @@ class ClassicalDetector:
         bg_std = float(np.std(search_region))
 
         # 2. Denoising & Top-Hat Morphological Filter (Isolates optical spot from fog/cloud backgrounds)
-        denoised = cv2.GaussianBlur(search_region, (3, 3), 0.8)
+        # Apply median filtering to extinguish discrete salt-and-pepper noise spikes
+        med_denoised = cv2.medianBlur(search_region, 3)
+        denoised = cv2.GaussianBlur(med_denoised, (3, 3), 0.8)
         
         # White Top-Hat: f - (f o b), extracts bright local features smaller than structuring element
         kernel_tophat = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
         tophat = cv2.morphologyEx(denoised, cv2.MORPH_TOPHAT, kernel_tophat)
 
+        # Quick reject if background is uniform noise without any valid optical spot
+        max_tophat = float(np.max(tophat)) if tophat.size > 0 else 0.0
+        if max_tophat < 25.0:
+            return DetectionResult(
+                detected=False,
+                confidence=0.0,
+                candidate_count=0,
+                method="Classical CV",
+                execution_time_ms=(time.perf_counter() - start_time) * 1000.0,
+                roi=roi,
+                peak_intensity=0.0,
+                snr_db=0.0,
+                signal_strength_pct=0.0,
+                rssi_dbm=-50.0,
+                coupling_efficiency=0.0
+            )
+
         # 3. Contrast Enhancement via CLAHE on Top-Hat filtered image
         enhanced = self.clahe.apply(tophat)
 
-        # 4. Dual Thresholding: Otsu on Top-Hat + High Intensity Slicing
-        # Adaptive thresholding on enhanced contrast
-        _, thresh_tophat = cv2.threshold(tophat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # 4. Dual Thresholding: Dynamic CFAR on Top-Hat + High Intensity Slicing
+        th_tophat = max(30.0, float(np.mean(tophat)) + 2.5 * float(np.std(tophat)))
+        _, thresh_tophat = cv2.threshold(tophat, th_tophat, 255, cv2.THRESH_BINARY)
         
         # Slicing threshold (4-sigma CFAR detection against Gaussian sensor noise)
-        th_val = max(35.0, bg_mean + 4.0 * bg_std)
+        th_val = max(38.0, bg_mean + 4.0 * bg_std)
         _, thresh_direct = cv2.threshold(denoised, min(th_val, 220.0), 255, cv2.THRESH_BINARY)
 
         # Combined binary mask
         combined_bin = cv2.bitwise_or(thresh_tophat, thresh_direct)
 
-        # 5. Morphological Processing
+        # 5. Morphological Processing (clean isolated noise specks)
         kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         opened = cv2.morphologyEx(combined_bin, cv2.MORPH_OPEN, kernel_open)
         kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -133,6 +152,8 @@ class ClassicalDetector:
 
             effective_std = max(1.5, bg_std)
             snr = (peak_val - bg_mean) / effective_std
+            snr_db = float(10.0 * math.log10(max(1.0, snr)))
+            rssi_dbm = float(-50.0 + 40.0 * (peak_val / 255.0))
 
             # Distance from prediction gating
             dist_to_pred = None
@@ -163,7 +184,9 @@ class ClassicalDetector:
                 mean_intensity=mean_val,
                 snr=snr,
                 circularity=circularity,
-                score=conf
+                score=conf,
+                snr_db=snr_db,
+                rssi_dbm=rssi_dbm
             )
             candidates.append(cand)
 
@@ -177,7 +200,12 @@ class ClassicalDetector:
                 candidate_count=0,
                 method="Classical CV",
                 execution_time_ms=exec_time_ms,
-                roi=roi
+                roi=roi,
+                peak_intensity=0.0,
+                snr_db=0.0,
+                signal_strength_pct=0.0,
+                rssi_dbm=-50.0,
+                coupling_efficiency=0.0
             )
 
         # Sort candidates descending by composite score
@@ -188,6 +216,10 @@ class ClassicalDetector:
         int_bbox = (int(best.x), int(best.y), int(best.width), int(best.height))
         patch_for_centroid = gray[int_bbox[1]:int_bbox[1] + int_bbox[3], int_bbox[0]:int_bbox[0] + int_bbox[2]]
         c_res = CentroidCalculator.compute(patch_for_centroid, int_bbox)
+
+        # Photometric coupling efficiency & signal strength
+        sig_pct = float(np.clip((best.peak_intensity / 255.0) * min(1.0, best.snr / 5.0) * 100.0, 0.0, 100.0))
+        coupling = float(np.clip(best.peak_intensity / 255.0, 0.0, 1.0))
 
         return DetectionResult(
             detected=True,
@@ -200,5 +232,9 @@ class ClassicalDetector:
             method="Classical CV",
             execution_time_ms=exec_time_ms,
             roi=roi,
-            peak_intensity=best.peak_intensity
+            peak_intensity=best.peak_intensity,
+            snr_db=best.snr_db,
+            signal_strength_pct=sig_pct,
+            rssi_dbm=best.rssi_dbm,
+            coupling_efficiency=coupling
         )
