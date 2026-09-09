@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments & Packaging
+.env
+.venv
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Operating System
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Large Generated Test Videos (preserve sample)
+reports/videos/*
+!reports/videos/sample_benchmark*
+!reports/videos/.gitkeep
+
+# Generated Exports & Telemetry Logs
+reports/exports/*
+!reports/exports/.gitkeep
+*.log
